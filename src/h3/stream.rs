@@ -33,10 +33,10 @@ use crate::octets;
 
 use super::frame;
 
-pub const HTTP3_CONTROL_STREAM_TYPE_ID: u8 = 0x43;
-pub const HTTP3_PUSH_STREAM_TYPE_ID: u8 = 0x50;
-pub const QPACK_ENCODER_STREAM_TYPE_ID: u8 = 0x48;
-pub const QPACK_DECODER_STREAM_TYPE_ID: u8 = 0x68;
+pub const HTTP3_CONTROL_STREAM_TYPE_ID: u64 = 0x0;
+pub const HTTP3_PUSH_STREAM_TYPE_ID: u64 = 0x1;
+pub const QPACK_ENCODER_STREAM_TYPE_ID: u64 = 0x2;
+pub const QPACK_DECODER_STREAM_TYPE_ID: u64 = 0x3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Type {
@@ -63,7 +63,7 @@ pub enum State {
 }
 
 impl Type {
-    pub fn deserialize(v: u8) -> Result<Type> {
+    pub fn deserialize(v: u64) -> Result<Type> {
         match v {
             HTTP3_CONTROL_STREAM_TYPE_ID => Ok(Type::Control),
             HTTP3_PUSH_STREAM_TYPE_ID => Ok(Type::Push),
@@ -83,7 +83,6 @@ pub struct Stream {
     ty: Option<Type>,
     is_local: bool,
     initialized: bool,
-    ty_len: u8,
     state: State,
     stream_offset: u64,
     buf: Vec<u8>,
@@ -91,7 +90,7 @@ pub struct Stream {
     buf_end_pos: u64,
     next_varint_len: usize,
     frame_payload_len: u64,
-    frame_type: Option<u8>,
+    frame_type: Option<u64>,
     frames: VecDeque<frame::Frame>,
 }
 
@@ -104,7 +103,7 @@ impl Stream {
         if crate::stream::is_bidi(id) {
             ty = Some(Type::Request);
             initialized = true;
-            state = State::FramePayloadLenLen;
+            state = State::FrameTypeLen;
         };
 
         Stream {
@@ -112,7 +111,6 @@ impl Stream {
             ty,
             is_local,
             initialized,
-            ty_len: 0,
             state,
             stream_offset: 0,
             // TODO: need a more elegant approach to buffer management.
@@ -155,17 +153,6 @@ impl Stream {
         Ok(())
     }
 
-    pub fn set_stream_type_len(&mut self, len: u8) -> Result<()> {
-        if self.state != State::StreamTypeLen {
-            return Err(Error::InternalError);
-        }
-
-        self.ty_len = len;
-        self.state = State::StreamType;
-
-        Ok(())
-    }
-
     pub fn set_stream_type(&mut self, ty: Type) -> Result<()> {
         if self.state != State::StreamType {
             return Err(Error::InternalError);
@@ -173,13 +160,10 @@ impl Stream {
 
         self.ty = Some(ty);
 
-        self.stream_offset += u64::from(self.ty_len);
-        self.buf_read_off += u64::from(self.ty_len);
-
         match ty {
-            Type::Request => self.state = State::FramePayloadLenLen,
+            Type::Request => self.state = State::FrameTypeLen,
 
-            Type::Control => self.state = State::FramePayloadLenLen,
+            Type::Control => self.state = State::FrameTypeLen,
 
             Type::Push => self.state = State::PushIdLen,
 
@@ -196,13 +180,17 @@ impl Stream {
         self.next_varint_len = len;
 
         match self.state {
+            State::StreamTypeLen => self.state = State::StreamType,
+
             State::FramePayloadLenLen => self.state = State::FramePayloadLen,
 
             State::FrameTypeLen => self.state = State::FrameType,
 
             State::PushIdLen => self.state = State::PushId,
 
-            _ => (),
+            _ => {
+                return Err(Error::InternalError);
+            },
         }
 
         Ok(())
@@ -227,15 +215,6 @@ impl Stream {
         Err(Error::Done)
     }
 
-    pub fn get_u8(&mut self) -> Result<(u8)> {
-        let ret = self.buf_bytes(1)?[0];
-
-        self.stream_offset += 1;
-        self.buf_read_off += 1;
-
-        Ok(ret)
-    }
-
     pub fn set_frame_payload_len(&mut self, len: u64) -> Result<()> {
         // Only expect frames on Control, Request and Push streams.
         if self.ty == Some(Type::Control) ||
@@ -243,7 +222,7 @@ impl Stream {
             self.ty == Some(Type::Push)
         {
             self.frame_payload_len = len;
-            self.state = State::FrameTypeLen;
+            self.state = State::FramePayload;
 
             return Ok(());
         }
@@ -251,7 +230,7 @@ impl Stream {
         Err(Error::UnexpectedFrame)
     }
 
-    pub fn set_frame_type(&mut self, ty: u8) -> Result<()> {
+    pub fn set_frame_type(&mut self, ty: u64) -> Result<()> {
         // Only expect frames on Control, Request and Push streams.
         match self.ty {
             Some(Type::Control) => {
@@ -272,7 +251,7 @@ impl Stream {
                     (_, true) => return Err(Error::UnexpectedFrame),
                 }
 
-                self.state = State::FramePayload;
+                self.state = State::FramePayloadLenLen;
             },
 
             Some(Type::Request) => match ty {
@@ -280,13 +259,13 @@ impl Stream {
                 frame::DATA_FRAME_TYPE_ID |
                 frame::PRIORITY_FRAME_TYPE_ID |
                 frame::PUSH_PROMISE_FRAME_TYPE_ID => {
-                    self.state = State::FramePayload;
+                    self.state = State::FramePayloadLenLen;
                 },
 
                 _ => return Err(Error::UnexpectedFrame),
             },
 
-            Some(Type::Push) => self.state = State::FramePayloadLenLen,
+            Some(Type::Push) => self.state = State::FrameTypeLen,
 
             _ => return Err(Error::UnexpectedFrame),
         }
@@ -318,7 +297,8 @@ impl Stream {
         // bytes were seen by the application layer.
         self.stream_offset += self.frame_payload_len;
 
-        self.state = State::FramePayloadLenLen;
+        // Set state to parse next frame
+        self.state = State::FrameTypeLen;
 
         Ok(())
     }

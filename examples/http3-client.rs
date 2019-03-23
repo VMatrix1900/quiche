@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<std::error::Error>> {
 
     config.verify_peer(true);
 
-    config.set_application_protos(b"\x05h3-18")?;
+    config.set_application_protos(b"\x05h3-19")?;
 
     config.set_idle_timeout(30);
     config.set_max_packet_size(MAX_DATAGRAM_SIZE as u64);
@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<std::error::Error>> {
         }
 
         if conn.is_established() && http3_conn.is_none() {
-            if conn.application_proto() != b"h3-18" {
+            if conn.application_proto() != b"h3-19" {
                 // TODO a better error code?
                 conn.close(false, 0x0, b"I don't support your ALPNs")?;
                 break;
