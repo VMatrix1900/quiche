@@ -756,7 +756,7 @@ mod tests {
     fn simple_request() {
         let mut buf = [0; 65535];
 
-        let mut config = crate::Config::new(crate::VERSION_DRAFT18).unwrap();
+        let mut config = crate::Config::new(crate::VERSION_DRAFT19).unwrap();
         config
             .load_cert_chain_from_pem_file("examples/cert.crt")
             .unwrap();
