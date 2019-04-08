@@ -195,7 +195,7 @@ static struct conn_io *create_conn(uint8_t *odcid, size_t odcid_len) {
 static void recv_cb(EV_P_ ev_io *w, int revents) {
     struct conn_io *tmp, *conn_io = NULL;
 
-    static uint8_t buf[65535];
+    static uint8_t buf[655350];
     static uint8_t out[MAX_DATAGRAM_SIZE];
 
     while (1) {
@@ -344,10 +344,11 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                     break;
                 }
 
+                fprintf(stderr, "%.*s", (int) recv_len, buf);
+
                 if (fin) {
-                    static const char *resp = "byez\n";
-                    quiche_conn_stream_send(conn_io->conn, s, (uint8_t *) resp,
-                                            5, true);
+                    quiche_conn_stream_send(conn_io->conn, s, (uint8_t *) buf,
+                                            100000, true);
                 }
             }
 
