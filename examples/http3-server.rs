@@ -48,6 +48,7 @@ Options:
   --root <dir>      Root directory [default: examples/root/]
   --name <str>      Name of the server [default: quic.tech]
   --no-retry        Disable stateless retry.
+  --no-grease       Don't send GREASE.
   -h --help         Show this screen.
 ";
 
@@ -62,7 +63,9 @@ fn main() -> Result<(), Box<std::error::Error>> {
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
-    env_logger::init();
+    env_logger::builder()
+        .default_format_timestamp_nanos(true)
+        .init();
 
     let args = docopt::Docopt::new(USAGE)
         .and_then(|dopt| dopt.parse())
@@ -102,6 +105,10 @@ fn main() -> Result<(), Box<std::error::Error>> {
 
     if std::env::var_os("SSLKEYLOGFILE").is_some() {
         config.log_keys();
+    }
+
+    if args.get_bool("--no-grease") {
+        config.grease(false);
     }
 
     loop {

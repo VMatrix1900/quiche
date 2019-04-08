@@ -49,7 +49,7 @@ const MAX_DATAGRAM_SIZE: usize = 1452;
 const INITIAL_WINDOW: usize = 10 * MAX_DATAGRAM_SIZE;
 const MINIMUM_WINDOW: usize = 2 * MAX_DATAGRAM_SIZE;
 
-const PERSISTENT_CONGESTION_THRESHOLD: u32 = 2;
+const PERSISTENT_CONGESTION_THRESHOLD: u32 = 3;
 
 #[derive(Debug)]
 pub struct Sent {
@@ -78,8 +78,6 @@ pub struct Recovery {
     time_of_last_sent_ack_eliciting_pkt: Instant,
 
     time_of_last_sent_crypto_pkt: Instant,
-
-    largest_sent_pkt: u64,
 
     largest_acked_pkt: [u64; packet::EPOCH_COUNT],
 
@@ -131,8 +129,6 @@ impl Default for Recovery {
 
             time_of_last_sent_ack_eliciting_pkt: now,
 
-            largest_sent_pkt: 0,
-
             largest_acked_pkt: [0; packet::EPOCH_COUNT],
 
             latest_rtt: Duration::new(0, 0),
@@ -180,8 +176,6 @@ impl Recovery {
         let is_crypto = pkt.is_crypto;
         let sent_bytes = pkt.size;
 
-        self.largest_sent_pkt = pkt_num;
-
         self.sent[epoch].insert(pkt_num, pkt);
 
         if in_flight {
@@ -214,7 +208,8 @@ impl Recovery {
         if let Some(pkt) = self.sent[epoch].get(&self.largest_acked_pkt[epoch]) {
             if pkt.ack_eliciting {
                 let ack_delay = Duration::from_micros(ack_delay);
-                self.update_rtt(pkt.time.elapsed(), ack_delay);
+                let latest_rtt = pkt.time.elapsed();
+                self.update_rtt(latest_rtt, ack_delay);
             }
         }
 
@@ -420,12 +415,15 @@ impl Recovery {
                 // We can't remove the lost packet from |self.sent| here, so
                 // simply keep track of the number so it can be removed later.
                 lost_pkt.push(unacked.pkt_num);
-            } else if self.loss_time[epoch].is_none() {
-                self.loss_time[epoch] = Some(unacked.time + loss_delay);
             } else {
-                let loss_time = self.loss_time[epoch].unwrap();
-                self.loss_time[epoch] =
-                    Some(cmp::min(loss_time, unacked.time + loss_delay));
+                let loss_time = match self.loss_time[epoch] {
+                    None => unacked.time + loss_delay,
+
+                    Some(loss_time) =>
+                        cmp::min(loss_time, unacked.time + loss_delay),
+                };
+
+                self.loss_time[epoch] = Some(loss_time);
             }
         }
 
@@ -447,7 +445,7 @@ impl Recovery {
         if let Some(mut p) = self.sent[epoch].remove(&pkt_num) {
             self.acked[epoch].append(&mut p.frames);
 
-            if p.ack_eliciting {
+            if p.in_flight {
                 // OnPacketAckedCC
                 self.bytes_in_flight -= p.size;
 
@@ -475,6 +473,13 @@ impl Recovery {
         false
     }
 
+    fn in_persistent_congestion(&mut self, _largest_lost_pkt: &Sent) -> bool {
+        let _congestion_period = self.pto() * PERSISTENT_CONGESTION_THRESHOLD;
+
+        // TODO: properly detect persistent congestion
+        false
+    }
+
     fn on_packets_lost(
         &mut self, lost_pkt: Vec<u64>, epoch: packet::Epoch, now: Instant,
     ) {
@@ -482,7 +487,7 @@ impl Recovery {
         // in-flight and non-in-flight packets, so need to keep track
         // of whether we saw any lost in-flight packet to trigger the
         // congestion event later.
-        let mut largest_lost_pkt_sent_time: Option<Instant> = None;
+        let mut largest_lost_pkt: Option<Sent> = None;
 
         for lost in lost_pkt {
             let mut p = self.sent[epoch].remove(&lost).unwrap();
@@ -501,23 +506,20 @@ impl Recovery {
 
             self.lost[epoch].append(&mut p.frames);
 
-            largest_lost_pkt_sent_time = Some(p.time);
+            largest_lost_pkt = Some(p);
         }
 
-        if largest_lost_pkt_sent_time.is_none() {
-            return;
-        }
+        if let Some(largest_lost_pkt) = largest_lost_pkt {
+            // CongestionEvent
+            if !self.in_recovery(largest_lost_pkt.time) {
+                self.recovery_start_time = Some(now);
 
-        // CongestionEvent
-        if !self.in_recovery(largest_lost_pkt_sent_time.unwrap()) {
-            self.recovery_start_time = Some(now);
+                self.cwnd /= 2;
+                self.cwnd = cmp::max(self.cwnd, MINIMUM_WINDOW);
+                self.ssthresh = self.cwnd;
+            }
 
-            self.cwnd /= 2;
-            self.cwnd = cmp::max(self.cwnd, MINIMUM_WINDOW);
-            self.ssthresh = self.cwnd;
-
-            // TODO: properly detect persistent congestion
-            if self.pto_count > PERSISTENT_CONGESTION_THRESHOLD {
+            if self.in_persistent_congestion(&largest_lost_pkt) {
                 self.cwnd = MINIMUM_WINDOW;
             }
         }
