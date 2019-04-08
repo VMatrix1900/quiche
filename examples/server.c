@@ -390,24 +390,13 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
 }
 
 int main(int argc, char *argv[]) {
-    const char *host = argv[1];
-    const char *port = argv[2];
-
-    const struct addrinfo hints = {
-        .ai_family = PF_UNSPEC,
-        .ai_socktype = SOCK_DGRAM,
-        .ai_protocol = IPPROTO_UDP
-    };
+    int portno = atoi(argv[1]);
 
     quiche_enable_debug_logging(debug_log, NULL);
 
-    struct addrinfo *local;
-    if (getaddrinfo(host, port, &hints, &local) != 0) {
-        perror("failed to resolve host");
-        return -1;
-    }
+    struct sockaddr_in serveraddr;
 
-    int sock = socket(local->ai_family, SOCK_DGRAM, 0);
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("failed to create socket");
         return -1;
@@ -418,7 +407,10 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    if (bind(sock, local->ai_addr, local->ai_addrlen) < 0) {
+    serveraddr.sin_family = AF_INET;
+    serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serveraddr.sin_port = htons((unsigned short)portno);
+    if (bind(sock, (struct sockaddr *) &serveraddr, sizeof(serveraddr)) < 0) {
         perror("failed to connect socket");
         return -1;
     }
@@ -429,8 +421,8 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    quiche_config_load_cert_chain_from_pem_file(config, "examples/cert.crt");
-    quiche_config_load_priv_key_from_pem_file(config, "examples/cert.key");
+    quiche_config_load_cert_chain_from_pem_file(config, "./cert.crt");
+    quiche_config_load_priv_key_from_pem_file(config, "./cert.key");
 
     quiche_config_set_application_protos(config,
         (uint8_t *) "\x05hq-18\x08http/0.9", 15);
@@ -457,8 +449,6 @@ int main(int argc, char *argv[]) {
     watcher.data = &c;
 
     ev_loop(loop, 0);
-
-    freeaddrinfo(local);
 
     quiche_config_free(config);
 
