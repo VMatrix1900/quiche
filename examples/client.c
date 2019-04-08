@@ -36,6 +36,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netdb.h>
 
 #include <ev.h>
@@ -46,13 +47,26 @@
 
 #define MAX_DATAGRAM_SIZE 1350
 
+#define N 100
+
 struct conn_io {
     ev_timer timer;
+    ev_timer request;
+    ev_timer close;
 
     int sock;
 
+    int request_id;
+
     quiche_conn *conn;
 };
+
+struct fct {
+    struct timeval begin;
+    struct timeval end;
+};
+
+struct fct fcts[N];
 
 static void debug_log(const char *line, void *argp) {
     fprintf(stderr, "%s\n", line);
@@ -89,7 +103,6 @@ static void flush_egress(struct ev_loop *loop, struct conn_io *conn_io) {
 }
 
 static void recv_cb(EV_P_ ev_io *w, int revents) {
-    static bool req_sent = false;
 
     struct conn_io *conn_io = w->data;
 
@@ -130,33 +143,13 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
         return;
     }
 
-    if (quiche_conn_is_established(conn_io->conn) && !req_sent) {
-        uint8_t *app_proto;
-        size_t app_proto_len;
-
-        quiche_conn_application_proto(conn_io->conn, &app_proto, &app_proto_len);
-
-        fprintf(stderr, "connection established: %.*s\n",
-                (int) app_proto_len, app_proto);
-
-        const static uint8_t r[] = "GET /index.html\r\n";
-        if (quiche_conn_stream_send(conn_io->conn, 4, r, sizeof(r), true) < 0) {
-            fprintf(stderr, "failed to send HTTP request\n");
-            return;
-        }
-
-        fprintf(stderr, "sent HTTP request\n");
-
-        req_sent = true;
-    }
-
     if (quiche_conn_is_established(conn_io->conn)) {
         uint64_t s = 0;
 
         quiche_readable *iter = quiche_conn_readable(conn_io->conn);
 
         while (quiche_readable_next(iter, &s)) {
-            fprintf(stderr, "stream %zu is readable\n", s);
+            fprintf(stderr, "stream %llu is readable\n", s);
 
             bool fin = false;
             ssize_t recv_len = quiche_conn_stream_recv(conn_io->conn, s,
@@ -169,13 +162,42 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
             printf("%.*s", (int) recv_len, buf);
 
             if (fin) {
-                if (quiche_conn_close(conn_io->conn, true, 0, NULL, 0) < 0) {
-                    fprintf(stderr, "failed to close connection\n");
-                }
+                gettimeofday(&fcts[s/4].end, NULL);
+                // if (quiche_conn_close(conn_io->conn, true, 0, NULL, 0) < 0) {
+                //     fprintf(stderr, "failed to close connection\n");
+                // }
             }
-        }
+                }
 
         quiche_readable_free(iter);
+            }
+
+    flush_egress(loop, conn_io);
+        }
+
+static void request_cb(EV_P_ ev_timer *w, int revents) {
+    struct conn_io *conn_io = w->data;
+    fprintf(stderr, "Begin to send request\n");
+    if (quiche_conn_is_established(conn_io->conn) && conn_io->request_id <= 4 * N) {
+        const static uint8_t r[] = "GET /index.html\r\n";
+        int result = quiche_conn_stream_send(conn_io->conn, conn_io->request_id, r, sizeof(r), true);
+        if (result < 0) {
+            fprintf(stderr, "failed to send HTTP request %d\n", result);
+            return;
+        } else {
+            fprintf(stderr, "sent HTTP request id: %d\n", conn_io->request_id);
+            gettimeofday(&fcts[conn_io->request_id / 4].begin, NULL);
+            conn_io->request_id += 4;
+        }
+    }
+
+    if (conn_io->request_id > 4 * N) {
+        conn_io->close.repeat = 1;
+        ev_timer_again(loop, &conn_io->close);
+        ev_timer_stop(loop, &conn_io->request);
+    } else {
+        conn_io->request.repeat = 0.1;
+        ev_timer_again(loop, &conn_io->request);
     }
 
     flush_egress(loop, conn_io);
@@ -201,6 +223,25 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
 
         ev_break(EV_A_ EVBREAK_ONE);
         return;
+    }
+}
+
+static void close_cb(EV_P_ ev_timer *w, int revents) {
+    struct conn_io *conn_io = w->data;
+
+    for (int i = 0; i < N; i++) {
+        struct timeval tm2 = fcts[i].end;
+        struct timeval tm1 = fcts[i].begin;
+        unsigned long long t = 1000 * (tm2.tv_sec - tm1.tv_sec) + (tm2.tv_usec - tm1.tv_usec) / 1000;
+        printf("%d, %lld\n", i, t);
+    }
+
+    if (quiche_conn_close(conn_io->conn, true, 0, NULL, 0) < 0) {
+        fprintf(stderr, "failed to close connection\n");
+        exit(-1);
+    } else {
+        fprintf(stderr, "connection closed\n");
+        exit(0);
     }
 }
 
@@ -285,6 +326,12 @@ int main(int argc, char *argv[]) {
 
     conn_io->sock = sock;
     conn_io->conn = conn;
+    conn_io->request_id = 4;
+
+    for (int i = 0; i < N; i++) {
+        fcts[i].begin = (struct timeval) {0};
+        fcts[i].end = (struct timeval) {0};
+    }
 
     ev_io watcher;
 
@@ -297,6 +344,14 @@ int main(int argc, char *argv[]) {
     ev_init(&conn_io->timer, timeout_cb);
     conn_io->timer.data = conn_io;
 
+    ev_init(&conn_io->request, request_cb);
+    conn_io->request.repeat = 0.1;
+    conn_io->request.data = conn_io;
+    ev_timer_again(loop, &conn_io->request);
+
+    ev_init(&conn_io->close, close_cb);
+    conn_io->close.data = conn_io;
+    
     flush_egress(loop, conn_io);
 
     ev_loop(loop, 0);
