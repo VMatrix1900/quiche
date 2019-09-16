@@ -47,8 +47,14 @@
 
 #define MAX_DATAGRAM_SIZE 1350
 
+#define MAX_BLOCK_SIZE 1000000  // 1Mbytes
+#define MAX_SEND_TIMES 100      // 200 times
+
 struct conn_io {
     ev_timer timer;
+    ev_timer sender;
+
+    int send_round;
 
     int sock;
 
@@ -89,9 +95,32 @@ static void flush_egress(struct ev_loop *loop, struct conn_io *conn_io) {
     ev_timer_again(loop, &conn_io->timer);
 }
 
-static void recv_cb(EV_P_ ev_io *w, int revents) {
-    static bool req_sent = false;
+static void sender_cb(EV_P_ ev_timer *w, int revents) {
+    struct conn_io *conn_io = w->data;
 
+    if (quiche_conn_is_established(conn_io->conn)) {
+        int block_size = 500000;
+        static uint8_t buf[MAX_BLOCK_SIZE];
+        if (quiche_conn_stream_send(conn_io->conn, 4*(conn_io->send_round + 1), buf, block_size, true) < 0) {
+            fprintf(stderr, "failed to send data round %d\n", conn_io->send_round);
+            return;
+        } else {
+
+            fprintf(stderr, "send round %d\n", conn_io->send_round);
+
+            conn_io->send_round ++;
+            // fprintf(stderr, "send round %d\n", conn_io->send_round);
+        }
+    
+        if (conn_io->send_round >= MAX_SEND_TIMES) {
+            ev_timer_stop(loop, &conn_io->sender);
+        }
+
+        flush_egress(loop, conn_io);
+    }
+}
+
+static void recv_cb(EV_P_ ev_io *w, int revents) {
     struct conn_io *conn_io = w->data;
 
     static uint8_t buf[65535];
@@ -129,54 +158,6 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
 
         ev_break(EV_A_ EVBREAK_ONE);
         return;
-    }
-
-    if (quiche_conn_is_established(conn_io->conn) && !req_sent) {
-        const uint8_t *app_proto;
-        size_t app_proto_len;
-
-        quiche_conn_application_proto(conn_io->conn, &app_proto, &app_proto_len);
-
-        fprintf(stderr, "connection established: %.*s\n",
-                (int) app_proto_len, app_proto);
-
-        const static uint8_t r[] = "GET /index.html\r\n";
-        if (quiche_conn_stream_send(conn_io->conn, 4, r, sizeof(r), true) < 0) {
-            fprintf(stderr, "failed to send HTTP request\n");
-            return;
-        }
-
-        fprintf(stderr, "sent HTTP request\n");
-
-        req_sent = true;
-    }
-
-    if (quiche_conn_is_established(conn_io->conn)) {
-        uint64_t s = 0;
-
-        quiche_stream_iter *readable = quiche_conn_readable(conn_io->conn);
-
-        while (quiche_stream_iter_next(readable, &s)) {
-            fprintf(stderr, "stream %" PRIu64 " is readable\n", s);
-
-            bool fin = false;
-            ssize_t recv_len = quiche_conn_stream_recv(conn_io->conn, s,
-                                                       buf, sizeof(buf),
-                                                       &fin);
-            if (recv_len < 0) {
-                break;
-            }
-
-            printf("%.*s", (int) recv_len, buf);
-
-            if (fin) {
-                if (quiche_conn_close(conn_io->conn, true, 0, NULL, 0) < 0) {
-                    fprintf(stderr, "failed to close connection\n");
-                }
-            }
-        }
-
-        quiche_stream_iter_free(readable);
     }
 
     flush_egress(loop, conn_io);
@@ -244,7 +225,7 @@ int main(int argc, char *argv[]) {
     }
 
     quiche_config_set_application_protos(config,
-        (uint8_t *) "\x05hq-23\x08http/0.9", 15);
+        (uint8_t *) "\x05hq-22\x08http/0.9", 15);
 
     quiche_config_set_idle_timeout(config, 5000);
     quiche_config_set_max_packet_size(config, MAX_DATAGRAM_SIZE);
@@ -254,6 +235,7 @@ int main(int argc, char *argv[]) {
     quiche_config_set_initial_max_streams_bidi(config, 100);
     quiche_config_set_initial_max_streams_uni(config, 100);
     quiche_config_set_disable_migration(config, true);
+    quiche_config_verify_peer(config, false);
 
     if (getenv("SSLKEYLOGFILE")) {
       quiche_config_log_keys(config);
@@ -287,6 +269,8 @@ int main(int argc, char *argv[]) {
 
     conn_io->sock = sock;
     conn_io->conn = conn;
+    conn_io->send_round = 0;
+
 
     ev_io watcher;
 
@@ -298,6 +282,11 @@ int main(int argc, char *argv[]) {
 
     ev_init(&conn_io->timer, timeout_cb);
     conn_io->timer.data = conn_io;
+
+    // start sending immediately and repeat every 100ms.
+    ev_timer_init(&conn_io->sender, sender_cb, 0., 0.1);
+    ev_timer_start(loop, &conn_io->sender);
+    conn_io->sender.data = conn_io;
 
     flush_egress(loop, conn_io);
 

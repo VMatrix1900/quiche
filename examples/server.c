@@ -48,6 +48,8 @@
 
 #define MAX_DATAGRAM_SIZE 1350
 
+#define MAX_BLOCK_SIZE 10000000
+
 #define MAX_TOKEN_LEN \
     sizeof("quiche") - 1 + \
     sizeof(struct sockaddr_storage) + \
@@ -196,7 +198,7 @@ static struct conn_io *create_conn(uint8_t *odcid, size_t odcid_len) {
 static void recv_cb(EV_P_ ev_io *w, int revents) {
     struct conn_io *tmp, *conn_io = NULL;
 
-    static uint8_t buf[65535];
+    static uint8_t buf[MAX_BLOCK_SIZE];
     static uint8_t out[MAX_DATAGRAM_SIZE];
 
     while (1) {
@@ -342,13 +344,16 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                                                            buf, sizeof(buf),
                                                            &fin);
                 if (recv_len < 0) {
+                    fprintf(stderr, "Stream recv wrong: %zd\n", recv_len);
                     break;
+                } else {
+                    fprintf(stderr, "Stream recv %zd bytes\n", recv_len);
                 }
 
                 if (fin) {
-                    static const char *resp = "byez\n";
-                    quiche_conn_stream_send(conn_io->conn, s, (uint8_t *) resp,
-                                            5, true);
+                    fprintf(stdout, "%" PRIu64, s);
+                    //fflush(stdout);
+                    fflush(stdout);
                 }
             }
 
@@ -379,7 +384,8 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
 
     if (quiche_conn_is_closed(conn_io->conn)) {
         fprintf(stderr, "connection closed\n");
-
+        fflush(stdout);
+        //exit(0);
         HASH_DELETE(hh, conns->h, conn_io);
 
         ev_timer_stop(loop, &conn_io->timer);
@@ -430,11 +436,11 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    quiche_config_load_cert_chain_from_pem_file(config, "examples/cert.crt");
-    quiche_config_load_priv_key_from_pem_file(config, "examples/cert.key");
+    quiche_config_load_cert_chain_from_pem_file(config, "./cert.crt");
+    quiche_config_load_priv_key_from_pem_file(config, "./cert.key");
 
     quiche_config_set_application_protos(config,
-        (uint8_t *) "\x05hq-23\x08http/0.9", 15);
+        (uint8_t *) "\x05hq-22\x08http/0.9", 15);
 
     quiche_config_set_idle_timeout(config, 5000);
     quiche_config_set_max_packet_size(config, MAX_DATAGRAM_SIZE);
